@@ -1,25 +1,68 @@
 # Gaokao-Master
 
-本项目以 Apache License 2.0 开源，详见 `LICENSE`。
+Gaokao-Master 是一个面向高考复习的本地知识库与学习工作台。它把试卷、笔记、解析、错题记录整理成 Obsidian 风格的 Markdown 工作区，并提供混合检索、试卷分析、错题本、OCR 入库和媒体库能力。
 
-Gaokao-Master 是一个本地 Python AI Agent 项目，目标是为高考备考构建可检索、可编辑、可生成个性化试卷的知识库与 Agent 系统。
+本项目以 Apache License 2.0 开源，详见 [LICENSE](LICENSE)。
 
-当前已实现：
+## 当前定位
 
-- Step 1: 项目结构与依赖清单
-- Step 2: `KnowledgeBaseManager`，支持 `.md`、`.txt`、`.pdf`、`.docx` 资料解析、Markdown 化、逻辑切分和 ChromaDB 向量入库
-- Step 3: Agent 工具层：`fuzzy_retrieve`、`workspace_editor`、`web_resource_scraper`
-- Step 4: LangGraph 主 Agent 与 `Exam_Generator_Agent`
-- Streamlit WebUI：资料导入、智能检索、个性化组卷、在线资源、Markdown 工作区
-- OpenAI-compatible API：可接入 OpenAI 官方接口或任意兼容 OpenAI Chat Completions 协议的外部大模型
+这个项目不再主打自动组卷或线上答题，而是服务于更稳定的复习闭环：
 
-后续步骤将加入：
+- 导入资料：把 PDF、DOCX、TXT、Markdown 转成可长期维护的 Markdown。
+- 检索资料：用语义检索和关键词检索定位知识点、题目、解析。
+- 分析试卷：统计题型结构、答案解析完整度、公式和图片情况，并可调用外部大模型生成复习建议。
+- 记录错题：把做错的题按科目、专题、状态沉淀到本地错题本。
+- 管理素材：保存 OCR 提取的题图、几何图、函数图像等媒体资源。
+- 本地优先：配置、知识库、错题和分析报告默认保存在本机。
 
-- 讲解生成、错因诊断和多轮学习规划
+已删除的旧功能：
 
-## 启动方式
+- 个性化组卷
+- 在线做题
+- 答题卡生成
 
-推荐在 Windows 下使用项目自带脚本：
+## 项目结构
+
+```text
+.
+├── agent_start.py
+├── install.bat
+├── start_agent.bat
+├── requirements.txt
+├── requirements-optional.txt
+├── scripts/
+│   ├── install.ps1
+│   └── start_agent.ps1
+└── src/
+    └── gaokao_master/
+        ├── config.py
+        ├── kb/
+        │   └── manager.py
+        ├── llm/
+        │   └── openai_compatible.py
+        ├── tools/
+        │   └── core.py
+        └── web/
+            └── app.py
+```
+
+运行后默认会创建：
+
+```text
+Gaokao_KB/
+├── _raw/                 # 原始上传/下载文件
+├── .vector_store/        # ChromaDB 向量库
+├── assets/               # 媒体库，题图和 OCR 裁剪图片
+├── 试卷分析/             # 保存的分析报告
+└── {科目}/
+    ├── {专题}/           # 导入后的资料 Markdown
+    └── 错题本/
+        └── {专题}/       # 错题 Markdown
+```
+
+## 安装与启动
+
+Windows 推荐使用项目脚本：
 
 ```powershell
 .\install.bat
@@ -33,35 +76,147 @@ Gaokao-Master 是一个本地 Python AI Agent 项目，目标是为高考备考�
 .\scripts\start_agent.ps1
 ```
 
-启动成功后访问：
+启动后访问：
 
 ```text
 http://127.0.0.1:8501
 ```
 
-如果需要安装可选重依赖，例如 `sentence-transformers`、`pdfplumber`、完整 LangChain 组件：
+如需安装可选重依赖，例如 `sentence-transformers` 或完整 LangChain 组件：
 
 ```powershell
 .\scripts\install.ps1 -Optional
 ```
 
-安装脚本默认使用清华 PyPI 镜像，适合国内网络。如果你要切换回官方源：
+安装脚本默认使用清华 PyPI 镜像。切换官方源：
 
 ```powershell
 .\scripts\install.ps1 -IndexUrl https://pypi.org/simple
 ```
 
-说明：核心依赖已尽量瘦身，避免默认安装时下载 PyTorch 等较大的包。默认向量化使用 `local-hash`，完全离线、无需下载模型文件。你也可以在 WebUI 左侧把 `Embedding 模型` 改成 `chromadb-default` 或 sentence-transformers 模型名，但这些模式可能触发额外模型下载。
+## WebUI 功能
 
-## 接入外部大模型
+### 资料导入
 
-方式一：在 WebUI 左侧“外部大模型”区域启用 OpenAI 兼容 API，并填写：
+支持上传：
 
-- `Base URL`：例如 `https://api.openai.com/v1`
-- `模型名`：例如 `gpt-4o-mini`
-- `API Key`：你的服务商密钥
+- `.md`
+- `.txt`
+- `.pdf`
+- `.docx`
 
-方式二：复制 `.env.example` 为 `.env`，填写：
+PDF 和 DOCX 会被转换成 Markdown，再写入本地 ChromaDB 向量库。上传的原始文件保存在：
+
+```text
+Gaokao_KB/_raw/uploads/{科目}/{专题}/
+```
+
+### 智能检索
+
+检索同时使用：
+
+- ChromaDB 语义检索
+- BM25 关键词检索
+
+适合查知识点、找题、定位解析、回看错题。
+
+### 错题本
+
+错题本支持：
+
+- 新增错题
+- 记录我的错误过程
+- 保存正确答案/标准解析
+- 标注错因和订正要点
+- 设置状态：`待复盘`、`已订正`、`已掌握`
+- 按科目、状态、关键词筛选
+- 可选调用 OpenAI 兼容大模型生成错因诊断
+
+错题保存位置：
+
+```text
+Gaokao_KB/{科目}/错题本/{专题}/
+```
+
+错题会同时写入向量库，之后可以通过智能检索找回。
+
+### 试卷分析
+
+试卷分析会先生成本地结构统计：
+
+- 题目数量
+- 选择题特征数量
+- 图片引用数量
+- 公式/LaTeX 特征数量
+- 答案/解析标记数量
+- 栏目结构
+- 高频知识点线索
+
+如果配置了 OpenAI 兼容 API，还可以生成更完整的 Markdown 报告：
+
+- 知识点分布
+- 难度梯度
+- 易错点
+- 复习优先级
+- 一周复盘计划
+
+分析报告保存位置：
+
+```text
+Gaokao_KB/试卷分析/
+```
+
+### 在线资源
+
+在线资源页支持：
+
+- Tavily 搜索
+- DuckDuckGo/Bing/Sogou HTML 兜底搜索
+- 手动粘贴 PDF/DOCX/DOC 链接
+- 下载后自动进入知识库管线
+
+搜索会偏向试卷、试题、真题、模拟、答案、解析等资源，并过滤志愿、分数线、录取、招生、大学排名等高噪声内容。
+
+下载文件保存位置：
+
+```text
+Gaokao_KB/_raw/web/{科目}/{专题}/
+```
+
+下载文件使用内容哈希命名，避免重复保存。同一内容的重复文件也可以在工作区的下载区中整理删除。
+
+### 工作区
+
+工作区包含：
+
+- Markdown 预览
+- 源码编辑
+- 媒体库
+- 下载区
+- RAG 区
+
+Markdown 预览接近 Obsidian 阅读效果，支持：
+
+- 表格
+- 代码块
+- 引用块
+- `[[双链]]`
+- `==高亮==`
+- 本地图片内嵌显示
+- 常见 LaTeX 数学公式预处理和渲染
+
+预览区内有打印按钮，可直接打印当前 Markdown 资料。
+
+## OpenAI 兼容 API
+
+WebUI 左侧可配置外部大模型：
+
+- `Base URL`
+- `模型名`
+- `API Key`
+- `Temperature`
+
+兼容 OpenAI Chat Completions 协议的服务均可接入。也可以使用 `.env` 作为兜底配置：
 
 ```bash
 OPENAI_API_KEY=sk-your-key
@@ -71,106 +226,85 @@ OPENAI_TEMPERATURE=0.2
 OPENAI_TIMEOUT=60
 ```
 
-启用后，`Exam_Generator_Agent` 会优先调用外部模型优化试卷结构和个性化说明；未配置或调用失败时，会自动回退到本地规则生成。
+当前会用到大模型的地方：
 
-## 在线资源搜索
+- 错题本：生成错因诊断与复习建议
+- 试卷分析：生成完整分析报告
 
-“在线资源”页支持三种方式：
+## OCR 与题图提取
 
-- 自动搜索：依次尝试 Tavily、DuckDuckGo/Bing、普通 HTML 搜索兜底。
-- 手动链接：每行粘贴一个 PDF/DOCX/DOC 链接，最稳定。
-- 本地上传：如果当前网络无法访问搜索引擎，在“资料导入”页上传本地文件。
+当 PDF 是扫描版或文本过少时，可以在 WebUI 左侧启用 OCR 多模态模型。
 
-如果你有 Tavily API Key，推荐直接在 WebUI 左侧“在线搜索”区域填写。
+需要填写：
 
-也可以在 `.env` 中配置作为兜底：
+- OCR Base URL
+- OCR 模型名
+- OCR API Key
+- OCR DPI
+- OCR 最大页数
 
-```bash
-TAVILY_API_KEY=tvly-your-key
-```
-
-配置后在线搜索会优先使用 Tavily，通常比网页搜索更稳定。
-
-原则：后续所有外部服务配置都会优先提供 WebUI 输入项，`.env` 只作为批量部署或默认值兜底。
-
-## 配置持久化
-
-WebUI 左侧的配置会自动保存到本地：
-
-```text
-.gaokao_master/settings.json
-```
-
-包括知识库路径、Embedding 模型、OpenAI-compatible API 配置、Tavily API Key 等。重启项目后会自动恢复。该文件已加入 `.gitignore`，不会被提交到仓库。
-
-## PDF 转 Markdown 说明
-
-PDF 转换优先使用 PyMuPDF 提取可复制文本。如果 PDF 是扫描图片版，系统会检测到文本不足。
-
-你可以在 WebUI 左侧开启：
-
-```text
-OCR 多模态模型 -> 自动 OCR 扫描版 PDF
-```
-
-填写支持图片输入的 OpenAI-compatible 多模态模型后，系统会自动把 PDF 页面渲染成图片并调用该模型 OCR。OCR 成功后会写入 Markdown 和向量库；OCR 未配置或失败时，会生成一份“需 OCR”的诊断 Markdown，但不会把空内容写入向量库。
-
-遇到 `needs_ocr_or_empty_pdf` 时，请优先使用：
-
-- 可复制文字版 PDF
-- DOCX 试卷
-- OCR 后的 PDF/TXT/Markdown
-- WebUI “资料导入”页手动上传 OCR 后文件
-
-OCR 配置同样会自动保存到 `.gaokao_master/settings.json`。
-
-## 工作区预览与删除
-
-WebUI 的“工作区”包含四个面板：
-
-- `Markdown 预览`：将 Markdown 渲染成接近 Obsidian 的阅读效果。
-- `源码编辑`：保留原始 Markdown 编辑能力。
-- `媒体库`：上传、预览、删除试卷题图等多媒体资源。
-- `下载区`：删除 `_raw` 下载/上传的原始文件，可选择同步删除对应 RAG 向量。
-- `RAG 区`：按 Markdown 删除向量记录，或清空当前 Chroma collection。
-
-删除操作会限制在知识库目录内，并要求确认勾选或输入 collection 名。
-
-预览支持常用 Obsidian 效果：
-
-- `$...$`、`$$...$$`、`\(...\)`、`\[...\]` 数学公式
-- 表格、代码块、引用块
-- `[[双链]]`、`[[目标|别名]]`
-- `==高亮==`
-
-公式会优先使用 `latex2mathml` 渲染成 MathML；如果该依赖未安装或遇到无法转换的公式，WebUI 会使用内置的本地简易公式渲染器处理高考试卷常见语法，例如 `\frac`、`\sqrt`、上下标、向量、角度、集合符号和希腊字母，不再把 `$...$` 源码直接显示出来。
-
-媒体库文件存放在：
-
-```text
-Gaokao_KB/assets/
-```
-
-在 Markdown 中可这样引用：
-
-```markdown
-![[figure.png]]
-![函数图像](assets/figure.png)
-```
-
-WebUI 预览会自动把本地图片内嵌显示，因此题目附带图片可以直接在试卷预览里查看。
-### OCR 题图提取
-
-开启 OCR 后，WebUI 侧边栏可以勾选 `OCR 时自动提取题图到媒体库`。系统会在 OCR PDF 时尝试从页面里裁剪图片块和矢量图块，保存到：
+启用 `OCR 时自动提取题图到媒体库` 后，系统会尝试从 PDF 页面中裁剪图片块和矢量图块，保存到：
 
 ```text
 Gaokao_KB/assets/{source_file_name}/
 ```
 
-OCR 模型会被提示在图形原位置输出 `[IMAGE_HERE]`，导入流程会把这些占位符替换成真实 Markdown 图片链接，例如：
+Markdown 中会插入类似链接：
 
 ```markdown
 ![page 1 figure 1](assets/example/page_001_figure_01.png)
 ```
 
-这样立体几何、函数图像、统计图等题目图片会随 Markdown 一起在 WebUI 预览中显示。
+这样立体几何、函数图像、统计图等题图可以直接在预览里显示。
+
+## 配置持久化
+
+WebUI 侧边栏配置会自动保存到：
+
+```text
+.gaokao_master/settings.json
+```
+
+包括：
+
+- 知识库路径
+- Embedding 模型
+- OpenAI 兼容 API 配置
+- Tavily API Key
+- OCR 配置
+
+`.gaokao_master/` 已加入 `.gitignore`，不会提交到仓库。
+
+## 向量化说明
+
+默认 Embedding 模型为：
+
+```text
+local-hash
+```
+
+它是一个完全离线的哈希向量函数，不会下载模型文件。优点是稳定、轻量、适合零配置启动；缺点是语义能力弱于真正的 embedding 模型。
+
+如果希望更强语义检索，可以在 WebUI 左侧把 `Embedding 模型` 改为：
+
+```text
+chromadb-default
+```
+
+或填写 sentence-transformers 模型名。注意这些模式可能触发额外模型下载。
+
+## CLI
+
+除了 WebUI，也可以运行简单检索 CLI：
+
+```powershell
+python agent_start.py cli
+```
+
+CLI 会读取本地知识库并返回检索命中。
+
+## 安全提示
+
+- 不要把真实 API Key 写入 README 或提交到 Git。
+- `.env`、`.gaokao_master/`、`Gaokao_KB/`、`.venv/` 已被忽略。
+- 公开仓库中只应保存代码、示例配置和文档，不应保存学生隐私数据或真实试卷版权材料。

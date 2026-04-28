@@ -58,10 +58,10 @@ def start_web(port: int) -> None:
 def start_cli() -> None:
     sys.path.insert(0, str(SRC_ROOT))
 
-    from gaokao_master.agents import MainGaokaoAgent
     from gaokao_master.kb import KnowledgeBaseManager
+    from gaokao_master.tools import fuzzy_retrieve
 
-    agent = MainGaokaoAgent(KnowledgeBaseManager())
+    manager = KnowledgeBaseManager()
     print("Gaokao-Master CLI 已启动。输入问题进行检索，输入 exit 退出。")
 
     while True:
@@ -71,9 +71,9 @@ def start_cli() -> None:
         if not user_input:
             continue
 
-        response = agent.invoke(user_input, top_k=5)
-        print(f"\nAgent：{response.message}")
-        for index, hit in enumerate(response.retrieval_hits, start=1):
+        hits = fuzzy_retrieve(user_input, kb_manager=manager, top_k=5)
+        print(f"\n找到 {len(hits)} 条相关资料。")
+        for index, hit in enumerate(hits, start=1):
             preview = hit.text.replace("\n", " ")[:180]
             print(f"{index}. [{hit.score:.3f}] {hit.subject}/{hit.topic} {preview}")
 

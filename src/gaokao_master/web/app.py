@@ -18,7 +18,6 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from gaokao_master.agents import MainGaokaoAgent  # noqa: E402
 from gaokao_master.config import AppSettings, load_app_settings, save_app_settings  # noqa: E402
 from gaokao_master.kb import DocumentExtractionError, KnowledgeBaseManager  # noqa: E402
 from gaokao_master.llm import (  # noqa: E402
@@ -52,7 +51,7 @@ def main() -> None:
     _inject_style()
 
     st.title("Gaokao-Master")
-    st.caption("本地高考知识库、混合检索与个性化组卷工作台")
+    st.caption("本地高考知识库、错题本、试卷分析与混合检索工作台")
 
     with st.sidebar:
         st.header("服务配置")
@@ -210,35 +209,20 @@ def main() -> None:
         model=model_name,
         temperature=temperature,
     )
-    ocr_client_for_ui = _build_ocr_client(
-        enabled=use_ocr,
-        api_key=ocr_api_key,
-        base_url=ocr_base_url,
-        model=ocr_model,
-        temperature=float(ocr_temperature),
-    )
-    agent = MainGaokaoAgent(manager, llm_client=llm_client)
-
     tabs = st.tabs(
-        ["资料导入", "智能检索", "个性化组卷", "在线做题", "答题卡", "在线资源", "工作区"]
+        ["资料导入", "智能检索", "错题本", "试卷分析", "在线资源", "工作区"]
     )
     with tabs[0]:
         _render_ingestion_tab(manager)
     with tabs[1]:
         _render_retrieval_tab(manager)
     with tabs[2]:
-        _render_exam_tab(agent)
+        _render_wrong_notebook_tab(manager, llm_client=llm_client)
     with tabs[3]:
-        _render_practice_tab(
-            manager,
-            llm_client=llm_client,
-            ocr_client=ocr_client_for_ui,
-        )
+        _render_paper_analysis_tab(manager, llm_client=llm_client)
     with tabs[4]:
-        _render_answer_card_tab()
-    with tabs[5]:
         _render_web_scraper_tab(manager, tavily_api_key=tavily_api_key)
-    with tabs[6]:
+    with tabs[5]:
         _render_workspace_tab(manager)
 
 
@@ -395,175 +379,183 @@ def _render_retrieval_tab(manager: KnowledgeBaseManager) -> None:
         _render_hits(hits)
 
 
-def _render_exam_tab(agent: MainGaokaoAgent) -> None:
-    st.subheader("个性化组卷")
-    st.write("输入当前薄弱点，主 Agent 会委托 Exam_Generator_Agent 从知识库筛题并生成练习卷。")
-
-    with st.form("exam_form"):
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            subject = st.text_input("科目", value="数学")
-            topic = st.text_input("专题，可留空", value="函数")
-            question_count = st.slider("题目数量", min_value=3, max_value=30, value=8)
-        with col2:
-            difficulty = st.selectbox("难度策略", ["mixed", "基础巩固", "中档提升", "压轴挑战"])
-            mastered = st.text_area("已掌握关键词，每行一个", height=96)
-
-        weak_points = st.text_area(
-            "薄弱点，每行一个",
-            value="函数单调性\n导数与切线\n参数取值范围",
-            height=140,
-        )
-        submitted = st.form_submit_button("生成个性化模拟卷", use_container_width=True)
-
-    if submitted:
-        with st.spinner("Exam_Generator_Agent 正在筛题和组卷..."):
-            response = agent.invoke(
-                "请根据我的薄弱点生成一份个性化模拟卷",
-                task_type="generate_exam",
-                subject=subject.strip() or "未分类",
-                topic=topic.strip() or None,
-                weak_points=[
-                    item.strip()
-                    for item in weak_points.splitlines()
-                    if item.strip()
-                ],
-                mastered_keywords=[
-                    item.strip()
-                    for item in mastered.splitlines()
-                    if item.strip()
-                ],
-                question_count=question_count,
-                difficulty=difficulty,
-            )
-
-        if response.exam_result is None:
-            st.error("组卷失败：没有生成结果。")
-            return
-
-        result = response.exam_result
-        st.success(response.message)
-        st.download_button(
-            "下载 Markdown 试卷",
-            data=result.markdown,
-            file_name=result.output_path.name,
-            mime="text/markdown",
-            use_container_width=True,
-        )
-        st.markdown(result.markdown)
-
-
-def _render_practice_tab(
+def _render_wrong_notebook_tab(
     manager: KnowledgeBaseManager,
     *,
     llm_client: OpenAICompatibleLLM | None,
-    ocr_client: OpenAICompatibleOCR | None,
 ) -> None:
-    st.subheader("在线做题与 AI 批改")
-    st.write("选择一份试卷，学生可以直接在线填写答案，也可以上传扫描答卷后交给大模型批改。")
+    st.subheader("错题本")
+    st.write("把真正做错的题沉淀成可复盘的 Markdown 记录，按科目、专题、状态追踪。")
+
+    add_tab, review_tab = st.tabs(["新增错题", "复盘错题"])
+
+    with add_tab:
+        with st.form("wrong_question_form", clear_on_submit=False):
+            col1, col2, col3 = st.columns([1, 1, 1])
+            with col1:
+                subject = st.text_input("科目", value="数学")
+                topic = st.text_input("专题", value="函数")
+            with col2:
+                source = st.text_input("来源", value="")
+                status = st.selectbox("状态", ["待复盘", "已订正", "已掌握"])
+            with col3:
+                priority = st.selectbox("优先级", ["高", "中", "低"], index=1)
+                tags = st.text_input("标签，用逗号分隔", value="错题")
+
+            question = st.text_area("题目", height=160)
+            my_answer = st.text_area("我的答案/错误过程", height=110)
+            correct_answer = st.text_area("正确答案/标准解析", height=110)
+            mistake_reason = st.text_area("错因", height=90)
+            correction = st.text_area("订正要点/下次提醒", height=90)
+            use_llm_diagnosis = st.checkbox(
+                "用大模型补全错因诊断与复习建议",
+                value=bool(llm_client and llm_client.is_configured),
+                disabled=not bool(llm_client and llm_client.is_configured),
+            )
+            submitted = st.form_submit_button("保存到错题本", use_container_width=True)
+
+        if submitted:
+            if not question.strip():
+                st.warning("请至少填写题目。")
+                return
+
+            llm_diagnosis = ""
+            if use_llm_diagnosis and llm_client and llm_client.is_configured:
+                with st.spinner("正在生成错因诊断..."):
+                    llm_diagnosis = _diagnose_wrong_question(
+                        llm_client=llm_client,
+                        question=question,
+                        my_answer=my_answer,
+                        correct_answer=correct_answer,
+                        mistake_reason=mistake_reason,
+                    )
+
+            markdown = _build_wrong_question_markdown(
+                subject=subject.strip() or "未分类",
+                topic=topic.strip() or "未分类",
+                source=source.strip(),
+                status=status,
+                priority=priority,
+                tags=[item.strip() for item in tags.split(",") if item.strip()],
+                question=question,
+                my_answer=my_answer,
+                correct_answer=correct_answer,
+                mistake_reason=mistake_reason,
+                correction=correction,
+                llm_diagnosis=llm_diagnosis,
+            )
+            saved_path = _save_wrong_question(
+                manager,
+                subject=subject.strip() or "未分类",
+                topic=topic.strip() or "未分类",
+                markdown=markdown,
+            )
+            st.success("错题已保存。")
+            st.code(str(saved_path), language="text")
+
+    with review_tab:
+        wrong_files = _list_wrong_question_files(manager.paths.root)
+        if not wrong_files:
+            st.info("错题本还没有记录。")
+            return
+
+        filters = st.columns([1, 1, 1])
+        with filters[0]:
+            subject_filter = st.text_input("按科目筛选", value="")
+        with filters[1]:
+            status_filter = st.selectbox("按状态筛选", ["全部", "待复盘", "已订正", "已掌握"])
+        with filters[2]:
+            keyword_filter = st.text_input("关键词", value="")
+
+        filtered_files = _filter_wrong_question_files(
+            manager.paths.root,
+            wrong_files,
+            subject_filter=subject_filter,
+            status_filter=status_filter,
+            keyword_filter=keyword_filter,
+        )
+        st.caption(f"共 {len(filtered_files)} 条错题记录")
+        if not filtered_files:
+            st.warning("没有匹配的错题。")
+            return
+
+        selected = st.selectbox("选择错题", filtered_files, key="wrong_question_file")
+        selected_path = manager.paths.root / selected
+        content = selected_path.read_text(encoding="utf-8")
+        st.markdown(content)
+
+        update_cols = st.columns([1, 2])
+        with update_cols[0]:
+            new_status = st.selectbox("更新状态", ["待复盘", "已订正", "已掌握"], key="wrong_status_update")
+        with update_cols[1]:
+            review_note = st.text_input("复盘备注", value="")
+
+        if st.button("保存复盘状态", use_container_width=True):
+            updated = _update_wrong_question_status(content, new_status, review_note)
+            selected_path.write_text(updated, encoding="utf-8")
+            st.success("复盘状态已更新。")
+
+        confirm_delete = st.checkbox("确认删除该错题")
+        if st.button("删除该错题", use_container_width=True):
+            if not confirm_delete:
+                st.warning("请先勾选确认删除。")
+            else:
+                deleted_vectors = manager.delete_vectors_for_markdown(selected_path)
+                selected_path.unlink()
+                st.warning(f"已删除错题，并删除 {deleted_vectors} 条向量记录。")
+
+
+def _render_paper_analysis_tab(
+    manager: KnowledgeBaseManager,
+    *,
+    llm_client: OpenAICompatibleLLM | None,
+) -> None:
+    st.subheader("试卷分析")
+    st.write("选择一份试卷，分析题型结构、答案解析完整度、公式图片情况，并可用大模型生成复习建议。")
 
     files = workspace_editor("list", kb_root=manager.paths.root)["files"]
     if not files:
         st.info("当前知识库还没有 Markdown 试卷。")
         return
 
-    selected_file = st.selectbox("选择试卷", files, key="practice_md")
+    selected_file = st.selectbox("选择试卷", files, key="analysis_md")
     paper_markdown = workspace_editor(
         "read",
         selected_file,
         kb_root=manager.paths.root,
     )["content"]
+    metrics = _analyze_paper_structure(paper_markdown)
 
-    left, right = st.columns([1.15, 0.85])
-    with left:
-        st.caption("试卷预览区支持打印。")
-        components.html(
-            _markdown_to_obsidian_document(
-                paper_markdown,
-                kb_root=manager.paths.root,
-                markdown_relative_path=selected_file,
-            ),
-            height=780,
-            scrolling=True,
-        )
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("题目数", str(metrics["question_count"]))
+    col2.metric("选择题特征", str(metrics["choice_like_count"]))
+    col3.metric("图片数", str(metrics["image_count"]))
+    col4.metric("答案/解析标记", str(metrics["answer_marker_count"]))
 
-    with right:
-        online_answer = st.text_area(
-            "在线作答区",
-            height=360,
-            placeholder="按题号填写答案，例如：\n1. A\n2. B\n15. 解：...",
-        )
-        uploaded_answer = st.file_uploader(
-            "上传扫描答卷/答案图片",
-            type=["png", "jpg", "jpeg", "pdf"],
-            key="answer_scan",
-        )
-        grading_notes = st.text_area(
-            "批改要求",
-            value="请按高考阅卷标准给出得分、扣分点、订正建议和下一步训练方向。",
-            height=110,
-        )
+    st.write("结构摘要")
+    st.markdown(_paper_metrics_to_markdown(metrics))
 
-        if st.button("提交给大模型批改", use_container_width=True):
-            if llm_client is None or not llm_client.is_configured:
-                st.warning("请先在左侧启用并配置 OpenAI 兼容 API。")
-                return
-
-            answer_text = online_answer.strip()
-            if uploaded_answer is not None:
-                if ocr_client is None or not ocr_client.is_configured:
-                    st.warning("上传扫描答卷需要先配置 OCR 多模态模型。")
-                    return
-                with st.spinner("正在识别扫描答卷..."):
-                    scanned_text = _extract_uploaded_answer_text(
-                        uploaded_answer.getvalue(),
-                        file_name=uploaded_answer.name,
-                        ocr_client=ocr_client,
-                    )
-                answer_text = "\n\n".join(
-                    part for part in [answer_text, scanned_text] if part.strip()
-                )
-
-            if not answer_text.strip():
-                st.warning("请在线填写答案，或上传一份扫描答卷。")
-                return
-
-            with st.spinner("大模型正在批改..."):
-                grading = _grade_student_answer(
-                    llm_client=llm_client,
-                    paper_markdown=paper_markdown,
-                    answer_text=answer_text,
-                    grading_notes=grading_notes,
-                )
-
-            record_path = _save_grading_record(
-                manager.paths.root,
-                paper_relative_path=selected_file,
-                answer_text=answer_text,
-                grading=grading,
+    focus = st.text_area(
+        "分析重点",
+        value="请分析这套试卷的知识点分布、难度梯度、易错点、复习优先级，并给出一周内的复盘计划。",
+        height=110,
+    )
+    if st.button("生成试卷分析报告", use_container_width=True):
+        with st.spinner("正在分析试卷..."):
+            report = _generate_paper_analysis_report(
+                llm_client=llm_client,
+                paper_markdown=paper_markdown,
+                metrics=metrics,
+                focus=focus,
             )
-            st.success("批改完成。")
-            st.markdown(grading)
-            st.caption(f"批改记录已保存：{record_path}")
-
-
-def _render_answer_card_tab() -> None:
-    st.subheader("广东高考练习答题卡")
-    st.write("生成语文、数学、英语、历史、思想政治、地理的 A4 可打印练习答题卡。")
-
-    subject = st.selectbox(
-        "选择科目",
-        ["语文", "数学", "英语", "历史", "思想政治", "地理"],
-    )
-    card_html = _answer_card_document(subject)
-    components.html(card_html, height=880, scrolling=True)
-    st.download_button(
-        "下载答题卡 HTML",
-        data=card_html,
-        file_name=f"广东高考_{subject}_答题卡.html",
-        mime="text/html",
-        use_container_width=True,
-    )
+        output_path = _save_paper_analysis(
+            manager.paths.root,
+            paper_relative_path=selected_file,
+            report=report,
+        )
+        st.success("试卷分析已生成。")
+        st.markdown(report)
+        st.caption(f"报告已保存：{output_path}")
 
 
 def _render_web_scraper_tab(
@@ -815,264 +807,321 @@ def _render_media_library_tab(kb_root: Path) -> None:
             st.warning("已删除媒体文件。")
 
 
-def _extract_uploaded_answer_text(
-    file_bytes: bytes,
-    *,
-    file_name: str,
-    ocr_client: OpenAICompatibleOCR,
-) -> str:
-    suffix = Path(file_name).suffix.lower()
-    if suffix == ".pdf":
-        import fitz
-
-        texts: list[str] = []
-        with fitz.open(stream=file_bytes, filetype="pdf") as pdf:
-            total_pages = len(pdf)
-            pages_to_process = min(total_pages, 12)
-            matrix = fitz.Matrix(180 / 72, 180 / 72)
-            for page_index in range(pages_to_process):
-                page = pdf[page_index]
-                pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-                texts.append(
-                    ocr_client.ocr_image(
-                        pixmap.tobytes("png"),
-                        page_number=page_index + 1,
-                        total_pages=total_pages,
-                    )
-                )
-        return "\n\n".join(text for text in texts if text.strip())
-
-    mime_type = mimetypes.guess_type(file_name)[0] or "image/png"
-    return ocr_client.ocr_image(
-        file_bytes,
-        page_number=1,
-        total_pages=1,
-        mime_type=mime_type,
-    )
-
-
-def _grade_student_answer(
+def _diagnose_wrong_question(
     *,
     llm_client: OpenAICompatibleLLM,
-    paper_markdown: str,
-    answer_text: str,
-    grading_notes: str,
+    question: str,
+    my_answer: str,
+    correct_answer: str,
+    mistake_reason: str,
 ) -> str:
     system_prompt = (
-        "你是严格、细致的高考阅卷教师。请根据试卷内容和学生答案批改。"
-        "如果试卷缺少标准答案，请先指出无法精确判分的题目，再依据解题过程给出合理估分。"
-        "输出 Markdown，包含总评、逐题得分、扣分原因、订正答案、薄弱点和后续训练建议。"
+        "你是高考错题诊断助手。请基于学生的错题记录，输出简洁、可执行的复盘建议。"
+        "不要重新出题，不要编造题目条件。"
     )
     user_prompt = "\n\n".join(
         [
-            "## 试卷",
-            paper_markdown[:60_000],
-            "## 学生答案",
-            answer_text[:30_000],
-            "## 批改要求",
-            grading_notes.strip(),
+            "## 题目",
+            question.strip(),
+            "## 我的答案/错误过程",
+            my_answer.strip() or "未填写",
+            "## 正确答案/解析",
+            correct_answer.strip() or "未填写",
+            "## 我自己写的错因",
+            mistake_reason.strip() or "未填写",
+            "请输出：核心错因、暴露的知识点漏洞、订正步骤、三条复盘提醒。",
         ]
     )
     return llm_client.chat(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
-        max_tokens=4_000,
+        max_tokens=1_200,
     )
 
 
-def _save_grading_record(
-    kb_root: Path,
+def _build_wrong_question_markdown(
     *,
-    paper_relative_path: str,
-    answer_text: str,
-    grading: str,
+    subject: str,
+    topic: str,
+    source: str,
+    status: str,
+    priority: str,
+    tags: list[str],
+    question: str,
+    my_answer: str,
+    correct_answer: str,
+    mistake_reason: str,
+    correction: str,
+    llm_diagnosis: str,
+) -> str:
+    created_at = datetime.now().isoformat(timespec="seconds")
+    tag_values = ", ".join(f'"{tag}"' for tag in tags)
+    return "\n\n".join(
+        [
+            "---",
+            'type: "wrong_question"',
+            f'subject: "{subject}"',
+            f'topic: "{topic}"',
+            f'source: "{source}"',
+            f'status: "{status}"',
+            f'priority: "{priority}"',
+            f"tags: [{tag_values}]",
+            f'created_at: "{created_at}"',
+            'reviewed_at: ""',
+            "---",
+            f"# 错题：{subject} / {topic}",
+            "## 题目",
+            question.strip(),
+            "## 我的答案/错误过程",
+            my_answer.strip() or "未填写",
+            "## 正确答案/标准解析",
+            correct_answer.strip() or "未填写",
+            "## 错因",
+            mistake_reason.strip() or "未填写",
+            "## 订正要点",
+            correction.strip() or "未填写",
+            "## AI 诊断",
+            llm_diagnosis.strip() or "未生成",
+            "## 复盘记录",
+            "- 尚未复盘",
+        ]
+    ).strip() + "\n"
+
+
+def _save_wrong_question(
+    manager: KnowledgeBaseManager,
+    *,
+    subject: str,
+    topic: str,
+    markdown: str,
 ) -> Path:
-    record_dir = kb_root / "learning_records" / "grading"
-    record_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_stem = re.sub(r'[<>:"/\\|?*\s]+', "_", Path(paper_relative_path).stem)
-    target = record_dir / f"{timestamp}_{safe_stem}.md"
-    target.write_text(
-        "\n\n".join(
-            [
-                "---",
-                f'paper: "{paper_relative_path}"',
-                f'graded_at: "{datetime.now().isoformat(timespec="seconds")}"',
-                "type: grading_record",
-                "---",
-                "# AI 批改记录",
-                "## 学生答案",
-                answer_text.strip(),
-                "## 批改结果",
-                grading.strip(),
-            ]
-        ),
-        encoding="utf-8",
+    target_dir = (
+        manager.paths.root
+        / manager._safe_part(subject)
+        / "错题本"
+        / manager._safe_part(topic)
+    )
+    target_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{manager._safe_filename(topic)}.md"
+    target = target_dir / filename
+    target.write_text(markdown, encoding="utf-8")
+
+    chunks = manager.chunk_markdown(markdown)
+    manager.upsert_markdown(
+        markdown_path=target,
+        chunks=chunks,
+        subject=subject,
+        topic=f"错题本/{topic}",
+        source_path=target,
+        tags=["wrong-question", topic],
     )
     return target
 
 
-def _answer_card_document(subject: str) -> str:
-    spec = _answer_card_specs()[subject]
-    objective_html = _answer_card_objective_grid(int(spec["objective_count"]))
-    written_html = "\n".join(
-        _answer_area(title, lines, height)
-        for title, lines, height in spec["written_areas"]
+def _list_wrong_question_files(kb_root: Path) -> list[str]:
+    files = []
+    for path in kb_root.rglob("*.md"):
+        try:
+            relative = path.relative_to(kb_root)
+        except ValueError:
+            continue
+        if "错题本" in relative.parts and path.is_file():
+            files.append(str(relative))
+    return sorted(files)
+
+
+def _filter_wrong_question_files(
+    kb_root: Path,
+    files: list[str],
+    *,
+    subject_filter: str,
+    status_filter: str,
+    keyword_filter: str,
+) -> list[str]:
+    subject_filter = subject_filter.strip().lower()
+    keyword_filter = keyword_filter.strip().lower()
+    filtered: list[str] = []
+
+    for relative in files:
+        path = kb_root / relative
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        metadata = _parse_frontmatter(text)
+        haystack = f"{relative}\n{text}".lower()
+        if subject_filter and subject_filter not in haystack:
+            continue
+        if status_filter != "全部" and metadata.get("status") != status_filter:
+            continue
+        if keyword_filter and keyword_filter not in haystack:
+            continue
+        filtered.append(relative)
+
+    return filtered
+
+
+def _parse_frontmatter(markdown_text: str) -> dict[str, str]:
+    if not markdown_text.startswith("---\n"):
+        return {}
+    parts = markdown_text.split("---\n", 2)
+    if len(parts) != 3:
+        return {}
+
+    metadata: dict[str, str] = {}
+    for line in parts[1].splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        metadata[key.strip()] = value.strip().strip('"')
+    return metadata
+
+
+def _update_wrong_question_status(
+    markdown_text: str,
+    new_status: str,
+    review_note: str,
+) -> str:
+    now = datetime.now().isoformat(timespec="seconds")
+    text = re.sub(
+        r'(?m)^status:\s*".*?"\s*$',
+        f'status: "{new_status}"',
+        markdown_text,
     )
-    title = f"2026 广东省普通高考练习答题卡 - {subject}"
-    return f"""
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    {_answer_card_css()}
-  </style>
-</head>
-<body>
-  <button class="print-button" onclick="window.print()">打印答题卡</button>
-  <main class="answer-card">
-    <section class="card-page">
-      <header class="card-header">
-        <div>
-          <h1>{html.escape(title)}</h1>
-          <p>{html.escape(str(spec["description"]))}</p>
-        </div>
-        <div class="barcode-box">条形码粘贴区</div>
-      </header>
-      <section class="student-info">
-        <label>姓名：<span></span></label>
-        <label>准考证号：<span></span></label>
-        <label>考场号：<span></span></label>
-        <label>座位号：<span></span></label>
-      </section>
-      <section class="notice">
-        <strong>注意事项</strong>
-        <ol>
-          <li>选择题使用 2B 铅笔填涂，非选择题使用黑色签字笔作答。</li>
-          <li>请在各题规定区域内作答，超出边框的答案无效。</li>
-          <li>本答题卡为 Gaokao-Master 练习模板，不是考试院正式答题卡。</li>
-        </ol>
-      </section>
-      <h2>选择题填涂区</h2>
-      {objective_html}
-      <h2>非选择题作答区</h2>
-      {written_html}
-    </section>
-  </main>
-</body>
-</html>
-"""
+    text = re.sub(
+        r'(?m)^reviewed_at:\s*".*?"\s*$',
+        f'reviewed_at: "{now}"',
+        text,
+    )
+    note = review_note.strip() or f"状态更新为：{new_status}"
+    if "## 复盘记录" not in text:
+        text += "\n\n## 复盘记录\n"
+    text = text.rstrip() + f"\n- {now}：{note}\n"
+    return text
 
 
-def _answer_card_specs() -> dict[str, dict[str, object]]:
+def _analyze_paper_structure(markdown_text: str) -> dict[str, object]:
+    body = _strip_frontmatter(markdown_text)
+    question_starts = re.findall(
+        r"(?m)^\s*(?:\d{1,3}[.．、]|第\s*[\d一二三四五六七八九十]+\s*题)",
+        body,
+    )
+    sections = re.findall(r"(?m)^#{1,3}\s+(.+)$|^\s*[一二三四五六七八九十]+[、.．]\s*(.+)$", body)
+    section_names = [item for group in sections for item in group if item]
+    choice_like_count = len(re.findall(r"(?m)^\s*[A-D][.．、]", body))
+    image_count = len(re.findall(r"!\[[^\]]*\]\([^)]+\)|!\[\[[^\]]+\]\]", body))
+    formula_count = len(re.findall(r"\$[^$]+\$|\\frac|\\sqrt|\\sum|\\vec", body))
+    answer_marker_count = len(re.findall(r"答案|参考答案|解析|详解", body))
+    keyword_hits = _guess_paper_keywords(body)
+
     return {
-        "语文": {
-            "objective_count": 20,
-            "description": "满分 150 分，考试时长 150 分钟。",
-            "written_areas": [
-                ("现代文阅读 / 古诗文阅读", 12, 190),
-                ("语言文字运用", 8, 130),
-                ("作文区", 24, 360),
-            ],
-        },
-        "数学": {
-            "objective_count": 11,
-            "description": "满分 150 分，考试时长 120 分钟。",
-            "written_areas": [
-                ("填空题", 4, 110),
-                ("解答题 15-17", 12, 210),
-                ("解答题 18-19", 12, 240),
-            ],
-        },
-        "英语": {
-            "objective_count": 55,
-            "description": "满分 150 分，考试时长 120 分钟。",
-            "written_areas": [
-                ("语法填空 / 短文填空", 6, 100),
-                ("应用文写作", 12, 180),
-                ("读后续写 / 书面表达", 16, 260),
-            ],
-        },
-        "历史": {
-            "objective_count": 16,
-            "description": "满分 100 分，选择性考试时长 75 分钟。",
-            "written_areas": [
-                ("非选择题 17", 10, 170),
-                ("非选择题 18", 10, 170),
-                ("选做/开放题", 8, 150),
-            ],
-        },
-        "思想政治": {
-            "objective_count": 16,
-            "description": "满分 100 分，选择性考试时长 75 分钟。",
-            "written_areas": [
-                ("非选择题 17", 10, 170),
-                ("非选择题 18", 10, 170),
-                ("非选择题 19", 8, 150),
-            ],
-        },
-        "地理": {
-            "objective_count": 16,
-            "description": "满分 100 分，选择性考试时长 75 分钟。",
-            "written_areas": [
-                ("综合题 17", 10, 170),
-                ("综合题 18", 10, 170),
-                ("选做/区域分析题", 8, 150),
-            ],
-        },
+        "char_count": len(body),
+        "question_count": len(question_starts),
+        "choice_like_count": choice_like_count,
+        "image_count": image_count,
+        "formula_count": formula_count,
+        "answer_marker_count": answer_marker_count,
+        "section_names": section_names[:12],
+        "keyword_hits": keyword_hits,
     }
 
 
-def _answer_card_objective_grid(count: int) -> str:
-    rows = []
-    for number in range(1, count + 1):
-        options = "".join(f"<span>{letter}</span>" for letter in "ABCD")
-        rows.append(f'<div class="choice-row"><b>{number:02d}</b>{options}</div>')
-    return f'<div class="objective-grid">{"".join(rows)}</div>'
+def _guess_paper_keywords(text: str) -> list[tuple[str, int]]:
+    candidates = [
+        "函数", "导数", "数列", "立体几何", "解析几何", "概率", "统计",
+        "集合", "复数", "三角函数", "向量", "阅读", "作文", "文言文",
+        "完形填空", "语法填空", "历史解释", "唯物史观", "区域地理",
+        "自然地理", "政治经济", "哲学", "文化", "法治",
+    ]
+    hits = [(keyword, text.count(keyword)) for keyword in candidates]
+    return [(keyword, count) for keyword, count in hits if count > 0][:12]
 
 
-def _answer_area(title: str, lines: int, height: int) -> str:
-    ruled_lines = "".join("<i></i>" for _ in range(lines))
-    return (
-        f'<section class="answer-area" style="min-height:{height}px">'
-        f"<h3>{html.escape(title)}</h3>"
-        f'<div class="ruled-lines">{ruled_lines}</div>'
-        "</section>"
+def _paper_metrics_to_markdown(metrics: dict[str, object]) -> str:
+    sections = metrics.get("section_names") or []
+    keywords = metrics.get("keyword_hits") or []
+    lines = [
+        f"- 字符数：{metrics['char_count']}",
+        f"- 公式/LaTeX 特征：{metrics['formula_count']}",
+        f"- 图片引用：{metrics['image_count']}",
+        f"- 答案解析标记：{metrics['answer_marker_count']}",
+    ]
+    if sections:
+        lines.append("- 识别到的栏目：" + "、".join(str(item) for item in sections))
+    if keywords:
+        lines.append(
+            "- 高频知识点线索："
+            + "、".join(f"{keyword}({count})" for keyword, count in keywords)
+        )
+    return "\n".join(lines)
+
+
+def _generate_paper_analysis_report(
+    *,
+    llm_client: OpenAICompatibleLLM | None,
+    paper_markdown: str,
+    metrics: dict[str, object],
+    focus: str,
+) -> str:
+    static_report = "\n\n".join(
+        [
+            "# 试卷分析报告",
+            "## 结构统计",
+            _paper_metrics_to_markdown(metrics),
+        ]
     )
+    if not llm_client or not llm_client.is_configured:
+        return (
+            static_report
+            + "\n\n## 复习建议\n"
+            + "- 当前未配置外部大模型，已生成结构统计。建议结合答案解析手动标注错题与薄弱专题。\n"
+        )
+
+    system_prompt = (
+        "你是高考复习规划助手。请分析一份试卷的结构、知识点、难度梯度和复盘优先级。"
+        "输出 Markdown，不要编造试卷中不存在的题目。"
+    )
+    user_prompt = "\n\n".join(
+        [
+            "## 静态统计",
+            _paper_metrics_to_markdown(metrics),
+            "## 分析重点",
+            focus.strip(),
+            "## 试卷正文",
+            paper_markdown[:60_000],
+        ]
+    )
+    llm_report = llm_client.chat(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        max_tokens=3_000,
+    )
+    return llm_report.strip() + "\n" if llm_report.strip() else static_report
 
 
-def _answer_card_css() -> str:
-    return """
-    body { margin: 0; background: #eef2f7; color: #111827; font-family: "Microsoft YaHei", "SimSun", sans-serif; }
-    .print-button { position: fixed; right: 24px; top: 18px; z-index: 10; border: 1px solid #1f2937; background: #fff; border-radius: 6px; padding: 8px 14px; font-weight: 700; cursor: pointer; }
-    .answer-card { padding: 24px; }
-    .card-page { width: 210mm; min-height: 297mm; box-sizing: border-box; margin: 0 auto; background: #fff; padding: 12mm; border: 1px solid #cbd5e1; }
-    .card-header { display: flex; justify-content: space-between; gap: 16px; border-bottom: 2px solid #111827; padding-bottom: 10px; }
-    h1 { margin: 0 0 6px; font-size: 24px; text-align: left; }
-    h2 { margin: 16px 0 8px; font-size: 16px; border-left: 5px solid #111827; padding-left: 8px; }
-    .barcode-box { width: 48mm; height: 22mm; border: 1px dashed #111827; display: flex; align-items: center; justify-content: center; color: #64748b; flex: 0 0 auto; }
-    .student-info { display: grid; grid-template-columns: 1fr 1.5fr 1fr 1fr; gap: 8px; margin: 12px 0; }
-    .student-info label { font-size: 14px; }
-    .student-info span { display: inline-block; min-width: 78px; border-bottom: 1px solid #111827; height: 18px; vertical-align: bottom; }
-    .notice { border: 1px solid #111827; padding: 8px 12px; font-size: 12px; }
-    .notice ol { margin: 4px 0 0 18px; padding: 0; }
-    .objective-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px 10px; border: 1px solid #111827; padding: 10px; }
-    .choice-row { display: flex; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; }
-    .choice-row b { width: 24px; }
-    .choice-row span { width: 18px; height: 18px; border: 1px solid #111827; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; }
-    .answer-area { border: 1px solid #111827; margin-top: 10px; padding: 8px; break-inside: avoid; }
-    .answer-area h3 { margin: 0 0 8px; font-size: 14px; }
-    .ruled-lines i { display: block; height: 18px; border-bottom: 1px solid #d1d5db; }
-    @media print {
-      body { background: #fff; }
-      .print-button { display: none; }
-      .answer-card { padding: 0; }
-      .card-page { border: 0; margin: 0; width: auto; min-height: auto; page-break-after: always; }
-      @page { size: A4; margin: 8mm; }
-    }
-    """
+def _save_paper_analysis(
+    kb_root: Path,
+    *,
+    paper_relative_path: str,
+    report: str,
+) -> Path:
+    target_dir = kb_root / "试卷分析"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_stem = re.sub(r'[<>:"/\\|?*\s]+', "_", Path(paper_relative_path).stem)
+    target = target_dir / f"{timestamp}_{safe_stem}.md"
+    target.write_text(
+        "\n\n".join(
+            [
+                "---",
+                'type: "paper_analysis"',
+                f'paper: "{paper_relative_path}"',
+                f'created_at: "{datetime.now().isoformat(timespec="seconds")}"',
+                "---",
+                report.strip(),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return target
 
 
 def _strip_frontmatter(markdown_text: str) -> str:
