@@ -97,13 +97,16 @@ class ExamGeneratorAgent:
         combined_hits: list[RetrievalHit] = []
 
         for weak_point in request.weak_points:
-            query = f"{request.subject} {request.topic or ''} {weak_point} 高考 题目 答案 解析"
+            query = (
+                f"{request.subject} {request.topic or ''} {weak_point} "
+                "高考 试题 题目 选择题 填空题 解答题"
+            )
             hits = fuzzy_retrieve(
                 query,
                 kb_manager=self.kb_manager,
                 subject=request.subject or None,
                 topic=request.topic,
-                top_k=max(request.question_count, 6),
+                top_k=max(request.question_count * 3, 12),
             )
             combined_hits.extend(hits)
 
@@ -128,6 +131,10 @@ class ExamGeneratorAgent:
         selected: list[RetrievalHit] = []
 
         for hit in state["hits"]:
+            question_text = _clean_question_text(hit.text)
+            if not question_text or _looks_like_answer_only_block(hit.text):
+                continue
+
             haystack = f"{hit.text} {hit.metadata}".lower()
             if any(keyword in haystack for keyword in mastered_keywords):
                 continue
@@ -263,9 +270,120 @@ class ExamGeneratorAgent:
 
 
 def _clean_question_text(text: str) -> str:
-    text = re.sub(r"^---\n.*?\n---\n", "", text, flags=re.DOTALL)
+    text = re.sub(r"^---\n.*?\n---\n", "", text, flags=re.DOTALL).strip()
+    text = _drop_answer_only_prefix(text)
+    text = _first_valid_question_block(text)
+    text = _strip_answer_and_analysis(text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _drop_answer_only_prefix(text: str) -> str:
+    lines = text.splitlines()
+    kept: list[str] = []
+    skipping = False
+
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^\d{1,3}[.．、]\s*【?\s*(?:答案|解析)", stripped):
+            skipping = True
+            continue
+        if skipping and re.match(r"^\d{1,3}[.．、]\s*【?\s*(?:答案|解析)", stripped):
+            continue
+        if skipping and _looks_like_question_start(stripped):
+            skipping = False
+        if not skipping:
+            kept.append(line)
+
+    return "\n".join(kept).strip()
+
+
+def _first_valid_question_block(text: str) -> str:
+    candidates = re.split(
+        r"(?m)(?=^\s*(?:\d{1,3}[.．、]|第\s*[\d一二三四五六七八九十]+\s*题)\s*)",
+        text,
+    )
+    valid_blocks = [
+        candidate.strip()
+        for candidate in candidates
+        if _looks_like_question_block(candidate)
+    ]
+    if valid_blocks:
+        return valid_blocks[0]
+    return text if _looks_like_question_block(text) else ""
+
+
+def _strip_answer_and_analysis(text: str) -> str:
+    answer_pattern = re.compile(
+        r"(?m)(?:^|\n)\s*(?:"
+        r"【\s*(?:答案|解析|参考答案|解答|详解)\s*】|"
+        r"(?:答案|解析|参考答案|解答|详解)\s*[:：]|"
+        r"证明如下\s*[:：]"
+        r")"
+    )
+    match = answer_pattern.search(text)
+    if match:
+        text = text[: match.start()]
+
+    trailing_patterns = [
+        r"(?m)^\s*来源\s*[:：].*$",
+        r"(?m)^\s*>?\s*匹配分\s*[:：].*$",
+    ]
+    for pattern in trailing_patterns:
+        text = re.sub(pattern, "", text)
+    return text.strip()
+
+
+def _looks_like_answer_only_block(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return True
+
+    first_lines = "\n".join(stripped.splitlines()[:8])
+    numbered_answer_lines = re.findall(
+        r"(?m)^\s*\d{1,3}[.．、]\s*【?\s*(?:答案|解析)",
+        first_lines,
+    )
+    if numbered_answer_lines:
+        return True
+
+    answer_markers = len(re.findall(r"(?:答案|解析|参考答案|详解)", stripped))
+    question_markers = len(
+        re.findall(r"(?:已知|设|若|求|证明|如图|下列|选择|填空|解答)", stripped)
+    )
+    starts_with_answer = re.match(
+        r"^\s*(?:【?\s*(?:答案|解析|参考答案|详解)|\d{1,3}[.．、]\s*【?\s*(?:答案|解析))",
+        stripped,
+    )
+    return bool(starts_with_answer and answer_markers >= question_markers)
+
+
+def _looks_like_question_block(text: str) -> bool:
+    stripped = text.strip()
+    if len(stripped) < 20:
+        return False
+    if _looks_like_answer_only_block(stripped):
+        return False
+    has_numbered_question = bool(
+        re.search(r"(?m)^\s*\d{1,3}[.．、]\s*(?!【?\s*(?:答案|解析))", stripped)
+    )
+    has_options = bool(re.search(r"(?m)^\s*[A-D][.．、]", stripped))
+    has_choice_blank = bool(re.search(r"[(（]\s*[　\s]*[)）]", stripped))
+    has_task_cue = bool(
+        re.search(r"(?:已知|设|若|求|证明|如图|下列|填空|解答|计算|问|是否)", stripped)
+    )
+    return bool(
+        (has_numbered_question and has_task_cue)
+        or has_options
+        or has_choice_blank
+    )
+
+
+def _looks_like_question_start(line: str) -> bool:
+    return bool(
+        re.match(r"^\d{1,3}[.．、]\s*(?!【?\s*(?:答案|解析))", line)
+        and re.search(r"(?:已知|设|若|求|证明|如图|下列|选择|填空|解答|计算)", line)
+    )
 
 
 def _safe_filename(value: str) -> str:
